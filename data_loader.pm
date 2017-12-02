@@ -77,6 +77,22 @@ sub readImagesFile($)
 	return $rh_images;
 }
 
+#-------------------------------------------
+# print image as ascii art
+
+sub dumpImage($)
+{
+	my ($raw_image, $width, $height) = @_;
+	die unless (defined $height);
+	for (my $i = 0; $i < $height; ++$i) {
+		my @l_table1 = split '', ( substr($raw_image, $i*$width, $width) );
+		 # sprintf("%03d", ord($_))
+		my @l_table2 = map { ord($_)==0?" ":(ord($_)<50?".":(ord($_)<100?":":(ord($_)<200?"x":"X")))} @l_table1;
+		print join('', @l_table2)."\n";
+	}
+	print "==============================\n";
+}
+
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 1;
