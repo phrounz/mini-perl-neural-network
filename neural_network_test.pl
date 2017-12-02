@@ -41,6 +41,9 @@ sub main()
 	my $ro_neural_network = undef;
 
 	if (scalar @ARGV == 1) {
+
+		# use a command-line argument to reload from a previously generated neural_network.storage file
+
 		my $neural_network_file = shift @ARGV;
 
 		$ro_neural_network = retrieve($neural_network_file);
