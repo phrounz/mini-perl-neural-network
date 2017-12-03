@@ -1,10 +1,5 @@
 #!/usr/bin/perl
 
-# https://www.youtube.com/watch?v=Ilg3gGewQ5U
-# https://www.youtube.com/watch?v=q555kfIFUCM
-# https://deeplearning4j.org/opendata
-# http://yann.lecun.com/exdb/mnist/
-
 use strict;
 use warnings;
 use Data::Dumper;
@@ -17,10 +12,14 @@ use data_loader;
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 
-# do a fastest, less efficient, training
+# train with only 5% of training data
 my $SHORT_TRAINING = 0;
 
+# test with only 10% of test data
+my $SHORT_TEST = 0;
+
 # show difference between expected result and actual result during training
+my $DEBUG_TRAINING_RESULT_STEP_BY_STEP = 0;
 my $DEBUG_TRAINING_COMPARE_RESULT = 0;
 
 # show weights and latest values before testing
@@ -28,8 +27,12 @@ my $DEBUG_SHOW_NEURAL_NETWORK_INTERNALS = 1;
 
 # show stuff during test
 my $DEBUG_TEST_RESULT_STEP_BY_STEP = 0;
-my $DEBUG_TEST_RESULT = 0;
+my $DEBUG_TEST_COMPARE_RESULT = 0;
 my $DEBUG_TEST_RESULT_BRIEF = 1;
+
+my $AUTO_AVERAGE = 0;
+my @l_sum_result;
+my $s__nb_tests = 0;
 
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
@@ -37,6 +40,8 @@ my $DEBUG_TEST_RESULT_BRIEF = 1;
 sub main()
 {
 	$| = 1;
+
+	$SIG{INT} = sub { print "\nCaught a sigint\n";exit 1; };
 
 	my $ro_neural_network = undef;
 
@@ -57,17 +62,12 @@ sub main()
 		$ro_neural_network = NeuralNetwork::new( [ $image_size, 16, 16, 10 ] );
 
 		print "\n==> Train from data ...\n";
-		my $rl_images = $rh_training_data->{rl_images};
-		my $rl_labels = $rh_training_data->{rl_labels};
-		for (my $i = 0; $i < $rh_training_data->{nb} * ($SHORT_TRAINING?0.05:1); $i++) {
-			print "  ".sprintf("%.3f", $i*100/$rh_training_data->{nb})." %\n" if ($i % 1000 == 0);
-			my $raw_image = $$rl_images[$i];
-			if (length($raw_image) == $image_size) {
-				runTraining($ro_neural_network, $raw_image, $$rl_labels[$i]);
-			} else {
-				warn "".length($raw_image)."!=".$image_size;
-			}
-		}
+		runEpochTraining(
+			$ro_neural_network,
+			$rh_training_data->{nb},
+			$rh_training_data->{rl_images},
+			$rh_training_data->{rl_labels},
+			$image_size);
 
 		print "\n==> Save neural network to disk ...\n";
 		store $ro_neural_network, 'neural_network.storage';
@@ -81,12 +81,20 @@ sub main()
 	print "\n==> Load test data ...\n";
 	my $rl_test_data = data_loader::loadDataFromFiles("t10k-labels.idx1-ubyte", "t10k-images.idx3-ubyte");
 
+	# my $raw_data_empty = '';
+	# for (my $i = 0; $i < $rl_test_data->{width} * $rl_test_data->{height}; ++$i) { $raw_data_empty .= chr(0) }
+	# $ro_neural_network->setSrcImageDataRaw($raw_data_empty);
+	# $ro_neural_network->compute();
+	# $ro_neural_network->printResultStr();
+	# die();
+
 	print "\n==> Test ...\n";
 	my $sum_successes = 0;
 	my $rl_images = $rl_test_data->{rl_images};
 	my $rl_labels = $rl_test_data->{rl_labels};
 	my $image_size = $rl_test_data->{width} * $rl_test_data->{height};
-	for (my $i = 0; $i < $rl_test_data->{nb}; $i++) {
+	my $nb_tests = $rl_test_data->{nb} * ($SHORT_TEST?0.1:1);
+	for (my $i = 0; $i < $nb_tests; $i++) {
 		print "  ".sprintf("%.3f", $i*100/$rl_test_data->{nb})." %\n" if ($i % 1000 == 0);
 		my $raw_image = $$rl_images[$i];
 		if (length($raw_image) == $image_size) {
@@ -96,7 +104,7 @@ sub main()
 		}
 	}
 	print "\n";
-	print "Successes: $sum_successes / $rl_test_data->{nb}\n";
+	print "Successes: $sum_successes / $nb_tests\n";
 
 	return 0;
 }
@@ -104,22 +112,64 @@ exit main();
 
 #-------------------------------------------
 
-sub runTraining($$$)
+sub runEpochTraining($$$$$)
 {
-	my ($ro_neural_network, $raw_data, $answer) = @_;
+	my ($ro_neural_network, $nb, $rl_images, $rl_labels, $image_size) = @_;
 
-	$ro_neural_network->setSrcImageDataRaw($raw_data);
-	$ro_neural_network->compute();
+	my $NB_EXAMPLES_PER_ITERATION = 100;
+	my $nb_iterations = $nb * ($SHORT_TRAINING?0.05:1) / $NB_EXAMPLES_PER_ITERATION;
+	for (my $i = 0; $i < $nb_iterations; $i++) {
+		#print "  ".sprintf("%.3f", $i*100/$nb)." %\n" if ($i % 1000 == 0);
+		my $sum_costs = 0.0;
 
-	my @l_expected_result;
-	for (my $i = 0; $i < $ro_neural_network->getNbNeuronsLastLayer(); $i++) {
-		push @l_expected_result, ($i==$answer ? 1.0 : 0.0);
+		# batch iteration
+		for (my $j = 0; $j < $NB_EXAMPLES_PER_ITERATION; ++$j) {
+
+			my $k = $i*$NB_EXAMPLES_PER_ITERATION+$j;
+
+			my $raw_image = $$rl_images[$k];
+			if (length($raw_image) == $image_size) {
+
+				my $answer = $$rl_labels[$k];
+
+				$ro_neural_network->setSrcImageDataRaw($raw_image);
+				$ro_neural_network->compute();
+
+				my @l_expected_result;
+				for (my $z = 0; $z < $ro_neural_network->getNbNeuronsLastLayer(); $z++) {
+					push @l_expected_result, ($z==$answer ? 1.0 : 0.0);
+				}
+
+				if ($DEBUG_TRAINING_COMPARE_RESULT) {
+					$ro_neural_network->printComparedResultsStr(\@l_expected_result);
+				}
+
+				if ($DEBUG_TRAINING_RESULT_STEP_BY_STEP && $i == 0 && $j == 0) {
+					$ro_neural_network->printDebug();
+					system("PAUSE");
+				}
+
+				$sum_costs += $ro_neural_network->getCost(\@l_expected_result);
+
+				$ro_neural_network->backpropagate(\@l_expected_result);
+
+			} else {
+				warn "".length($raw_image)."!=".$image_size;
+			}
+
+		}
+
+		my $infomessage = "  Done: $i / $nb_iterations (iteration average cost: ".($sum_costs*1.0/$NB_EXAMPLES_PER_ITERATION).")\n";
+		if ($DEBUG_TRAINING_RESULT_STEP_BY_STEP) {
+			$ro_neural_network->printDebug();
+			print $infomessage;
+			#system("PAUSE");
+		} else {
+			print $infomessage;
+		}
+
+		#$ro_neural_network->changeWeights();
 	}
-	if ($DEBUG_TRAINING_COMPARE_RESULT) {
-		$ro_neural_network->printComparedResultsStr(\@l_expected_result);
-	}
-
-	$ro_neural_network->backpropagate(\@l_expected_result);
 }
 
 #-------------------------------------------
@@ -130,22 +180,46 @@ sub runTest($$$)
 
 	$ro_neural_network->setSrcImageDataRaw($raw_data);
 	$ro_neural_network->compute();
-#die();
 	my @l_result = $ro_neural_network->getResult();
+
+	if ($AUTO_AVERAGE) {
+		if ($s__nb_tests == 0) {
+			@l_sum_result = @l_result;
+		} elsif ($s__nb_tests < 100) {
+			for (my $i = 0; $i < scalar(@l_result); ++$i) {
+				$l_sum_result[$i] += $l_result[$i];
+			}
+		} else {
+			for (my $i = 0; $i < scalar(@l_result); ++$i) {
+				$l_result[$i] -= $l_sum_result[$i]/100.0;
+			}
+		}
+		$s__nb_tests++;
+	}
+
 	my $biggest_index = undef;
-	foreach (my $i = 0; $i < scalar(@l_result); ++$i) {
+	for (my $i = 0; $i < scalar(@l_result); ++$i) {
 		if (!defined($biggest_index) || ($l_result[$i] > $l_result[$biggest_index])) {
 			$biggest_index = $i;
 		}
 	}
 
+	my @l_expected_result;
+	for (my $z = 0; $z < $ro_neural_network->getNbNeuronsLastLayer(); $z++) {
+		push @l_expected_result, ($z==$answer ? 1.0 : 0.0);
+	}
+
+	if ($DEBUG_TEST_COMPARE_RESULT) {
+		print "Expecting: $answer - Got: $biggest_index - ";
+		print "Cost ".$ro_neural_network->getCost(\@l_expected_result)." - ";
+		print "nb_tests: $s__nb_tests - " if ($AUTO_AVERAGE);
+		#print "(".join(" ", @l_sum_result).")" if ($AUTO_AVERAGE);
+		$ro_neural_network->printResultStr();
+	}
+
 	if ($DEBUG_TEST_RESULT_STEP_BY_STEP) {
 		$ro_neural_network->printDebug();
 		system("PAUSE");
-	}
-	if ($DEBUG_TEST_RESULT) {
-		print "Expecting: $answer - Got: $biggest_index - ";
-		$ro_neural_network->printResultStr();
 	}
 
 	if ($DEBUG_TEST_RESULT_BRIEF) {
